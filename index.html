@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nilai Quran Hadits (Online) - MI Al Raudhatul Islamiyah</title>
+    
+    <!-- Library Pendukung (React, Tailwind, Excel) -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getFirestore, doc, onSnapshot, setDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+
+        // --- KONFIGURASI DATABASE IBU ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyBgakl49meoZwBa9rMnAo56OoRXryRGGrE",
+            authDomain: "raport-qh.firebaseapp.com",
+            projectId: "raport-qh",
+            storageBucket: "raport-qh.firebasestorage.app",
+            messagingSenderId: "692865457759",
+            appId: "1:692865457759:web:4312876da3fe64e653c5ea",
+            measurementId: "G-MNY5XJ0S0B"
+        };
+        
+        // Inisialisasi Firebase
+        try {
+            const app = initializeApp(firebaseConfig);
+            const db = getFirestore(app);
+            const auth = getAuth(app);
+            // Simpan di window agar bisa diakses React
+            window.firebaseServices = { db, auth, doc, onSnapshot, setDoc, signInAnonymously };
+            console.log("Firebase berhasil terhubung!");
+        } catch (e) {
+            console.error("Firebase Error:", e);
+            alert("Gagal menghubungkan ke database. Cek koneksi internet.");
+        }
+    </script>
+
+    <style>
+        body { -webkit-tap-highlight-color: transparent; background-color: #f0fdf4; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        /* Animasi Loading */
+        .spinner { border: 3px solid rgba(0,0,0,0.1); border-left-color: #16a34a; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            // --- STATE APLIKASI ---
+            const [view, setView] = useState('login'); 
+            const [schoolCode, setSchoolCode] = useState(''); 
+            const [syncStatus, setSyncStatus] = useState('offline'); // offline, syncing, saved, error
+            
+            // Data Nilai
+            const [activeTab, setActiveTab] = useState('siswa');
+            const [selectedClass, setSelectedClass] = useState('1A');
+            const [students, setStudents] = useState([]);
+            const [topics, setTopics] = useState([]);
+            const [topicGrades, setTopicGrades] = useState({});
+            const [summativeGrades, setSummativeGrades] = useState({});
+
+            // Form Inputs
+            const [tempStudentName, setTempStudentName] = useState('');
+            const [tempTopicName, setTempTopicName] = useState('');
+            const [tempKKM, setTempKKM] = useState('70');
+            const [selectedTopicIdForInput, setSelectedTopicIdForInput] = useState('');
+            const [inputType, setInputType] = useState('materi');
+            
+            // Edit Helper
+            const [isGradeEditable, setIsGradeEditable] = useState(false);
+            const [editingStudentId, setEditingStudentId] = useState(null);
+            const [editStudentName, setEditStudentName] = useState('');
+            const [editingTopicId, setEditingTopicId] = useState(null);
+            const [editTopicName, setEditTopicName] = useState('');
+            const [editTopicKKM, setEditTopicKKM] = useState('');
+
+            const excelInputRef = useRef(null);
+            const classList = ['1A', '1B', '2A', '2B', '3A', '3B', '4A', '4B', '5A', '5B', '6A', '6B'];
+            const getGradeLevel = (cls) => cls.charAt(0);
+
+            // --- KONEKSI FIREBASE (REALTIME) ---
+            useEffect(() => {
+                if (view === 'app' && window.firebaseServices && schoolCode) {
+                    const { db, doc, onSnapshot } = window.firebaseServices;
+                    setSyncStatus('syncing');
+
+                    // Langganan data realtime (Live)
+                    const docRef = doc(db, "schools", schoolCode);
+                    const unsubscribe = onSnapshot(docRef, (docSnap) => {
+                        if (docSnap.exists()) {
+                            const data = docSnap.data();
+                            setStudents(data.students || []);
+                            setTopics(data.topics || []);
+                            setTopicGrades(data.topicGrades || {});
+                            setSummativeGrades(data.summativeGrades || {});
+                            setSyncStatus('saved');
+                        } else {
+                            // Dokumen baru
+                            setSyncStatus('saved');
+                        }
+                    }, (err) => {
+                        console.error(err);
+                        setSyncStatus('error');
+                    });
+
+                    return () => unsubscribe();
+                }
+            }, [view, schoolCode]);
+
+            // --- SIMPAN DATA OTOMATIS (DEBOUNCE) ---
+            const saveTimeoutRef = useRef(null);
+            
+            const saveData = () => {
+                if (!window.firebaseServices || view !== 'app') return;
+                
+                setSyncStatus('syncing');
+                if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+
+                saveTimeoutRef.current = setTimeout(async () => {
+                    const { db, doc, setDoc } = window.firebaseServices;
+                    try {
+                        await setDoc(doc(db, "schools", schoolCode), {
+                            students, topics, topicGrades, summativeGrades,
+                            lastUpdated: new Date().toISOString()
+                        });
+                        setSyncStatus('saved');
+                    } catch (e) {
+                        console.error("Gagal simpan:", e);
+                        setSyncStatus('error');
+                    }
+                }, 1500); // Jeda 1.5 detik setelah ketik baru simpan
+            };
+
+            // Trigger simpan saat ada perubahan data
+            useEffect(() => {
+                if (view === 'app') saveData();
+            }, [students, topics, topicGrades, summativeGrades]);
+
+            // --- FUNGSI LOGIN ---
+            const handleLogin = async () => {
+                if (!schoolCode || schoolCode.length < 3) {
+                    alert("Kode Sekolah terlalu pendek. Contoh: MIRA-QURAN");
+                    return;
+                }
+                
+                if (window.firebaseServices) {
+                    const { auth, signInAnonymously } = window.firebaseServices;
+                    try {
+                        await signInAnonymously(auth);
+                        setView('app');
+                    } catch (e) {
+                        alert("Gagal login. Periksa koneksi internet.");
+                    }
+                } else {
+                    alert("Firebase belum siap. Coba refresh halaman.");
+                }
+            };
+
+            // --- LOGIKA HITUNG NILAI ---
+            const calculateTaskAvg = (g) => {
+                if (!g) return 0;
+                const t1 = parseFloat(g.task1 || 0);
+                const t2 = parseFloat(g.task2 || 0);
+                const t3 = parseFloat(g.task3 || 0);
+                return (t1 + t2 + t3) / 3;
+            };
+
+            const calculateFinalTopicScore = (g, kkm) => {
+                if (!g) return 0;
+                const avg = calculateTaskAvg(g);
+                if (avg < kkm) return Math.max(avg, parseFloat(g.remedial || 0));
+                return avg;
+            };
+
+            const calculateFinalReport = (studentId) => {
+                const student = students.find(s => s.id === studentId);
+                if (!student) return 0;
+                const gradeLevel = getGradeLevel(student.classId);
+                const classTopics = topics.filter(t => t.classId === gradeLevel);
+                if (classTopics.length === 0) return 0;
+
+                let total = 0;
+                classTopics.forEach(t => total += calculateFinalTopicScore(topicGrades[`${studentId}_${t.id}`], t.kkm));
+                const avgMateri = total / classTopics.length;
+                return (avgMateri * 0.7) + (parseFloat(summativeGrades[studentId] || 0) * 0.3);
+            };
+
+            // --- IMPORT EXCEL ---
+            const handleImportExcel = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (evt) => {
+                    try {
+                        const data = new Uint8Array(evt.target.result);
+                        const workbook = XLSX.read(data, { type: 'array' });
+                        const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+                        const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+                        
+                        let addedCount = 0;
+                        const newStudents = [...students];
+
+                        jsonData.forEach((row, index) => {
+                            // Cek kolom ke-2 (Index 1) untuk Nama (sesuai format file Ibu)
+                            let name = '';
+                            if (row[1] && typeof row[1] === 'string') name = row[1]; // Prioritas kolom B
+                            else if (row[0] && typeof row[0] === 'string' && isNaN(row[0])) name = row[0]; // Fallback kolom A
+                            
+                            const isHeader = name.toLowerCase().includes('nama') || name.toLowerCase().includes('kelas') || name.toLowerCase().includes('no');
+                            
+                            if (name && !isHeader && name.length > 2) {
+                                newStudents.push({ 
+                                    id: Date.now() + Math.random().toString(36).substr(2,5), 
+                                    name: name.trim(), 
+                                    classId: selectedClass 
+                                });
+                                addedCount++;
+                            }
+                        });
+
+                        setStudents(newStudents);
+                        alert(`Berhasil menambahkan ${addedCount} siswa ke Kelas ${selectedClass}!`);
+                        e.target.value = '';
+                    } catch (err) {
+                        alert("Gagal membaca file Excel. Pastikan formatnya .xlsx");
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            };
+
+            // --- EXPORT REKAP (FORMAT LENGKAP) ---
+            const downloadCSV = () => {
+                const gradeLevel = getGradeLevel(selectedClass);
+                const classTopics = topics.filter(t => t.classId === gradeLevel);
+                const classStudents = students.filter(s => s.classId === selectedClass);
+                if (!classStudents.length) return alert("Belum ada data di kelas ini.");
+
+                let csv = "data:text/csv;charset=utf-8,";
+                
+                // Header Baris 1
+                csv += "No,Nama,";
+                classTopics.forEach(t => csv += `${t.name.replace(/,/g,' ')},,,,,`); // 5 kolom per materi
+                csv += "NILAI AKHIR,,,,,,\n"; // Spacer untuk hasil akhir
+
+                // Header Baris 2
+                csv += ",,";
+                classTopics.forEach(() => csv += "1,2,3,Rt,Akhir,");
+                csv += "Rata Materi,70%,Sumatif,30%,RAPOR\n";
+
+                // Data Baris
+                classStudents.forEach((s, idx) => {
+                    let row = `${idx+1},"${s.name}",`;
+                    let totalFinalScore = 0;
+
+                    classTopics.forEach(t => {
+                        const g = topicGrades[`${s.id}_${t.id}`] || {};
+                        const avg = calculateTaskAvg(g);
+                        const final = calculateFinalTopicScore(g, t.kkm);
+                        totalFinalScore += final;
+                        
+                        // Kolom 1, 2, 3, Rt, Akhir
+                        row += `${g.task1||0},${g.task2||0},${g.task3||0},${avg.toFixed(1)},${final.toFixed(0)},`;
+                    });
+
+                    const avgMateri = classTopics.length ? totalFinalScore/classTopics.length : 0;
+                    const val70 = avgMateri * 0.7;
+                    const sumatif = parseFloat(summativeGrades[s.id] || 0);
+                    const val30 = sumatif * 0.3;
+                    const rapor = val70 + val30;
+
+                    row += `${avgMateri.toFixed(1)},${val70.toFixed(1)},${sumatif},${val30.toFixed(1)},${rapor.toFixed(0)}\n`;
+                    csv += row;
+                });
+
+                const link = document.createElement("a");
+                link.href = encodeURI(csv);
+                link.download = `Raport_Online_${selectedClass}_${schoolCode}.csv`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+            // Filter Helpers
+            const filteredStudents = students.filter(s => s.classId === selectedClass);
+            const filteredTopics = topics.filter(t => t.classId === getGradeLevel(selectedClass));
+
+            // --- TAMPILAN LOGIN ---
+            if (view === 'login') {
+                return (
+                    <div className="min-h-screen flex items-center justify-center p-4 bg-green-50">
+                        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-sm w-full text-center">
+                            <div className="text-5xl mb-4">🌐</div>
+                            <h1 className="text-2xl font-bold text-green-800 mb-1">Rapor Quran Hadits</h1>
+                            <p className="text-gray-500 text-xs mb-6 font-medium bg-green-100 inline-block px-2 py-1 rounded">Versi Online (Database)</p>
+                            
+                            <label className="block text-left text-xs font-bold text-gray-500 mb-1 ml-1">KODE SEKOLAH / KELAS</label>
+                            <input 
+                                type="text" 
+                                value={schoolCode}
+                                onChange={e => setSchoolCode(e.target.value.toUpperCase().replace(/\s/g,'-'))}
+                                placeholder="CONTOH: KLS6-IBU"
+                                className="w-full border-2 border-green-200 p-3 rounded-xl text-center font-bold text-xl uppercase mb-2 focus:border-green-600 outline-none"
+                            />
+                            <p className="text-[10px] text-gray-400 mb-6">
+                                *Gunakan kode yang SAMA di semua perangkat agar data terhubung.
+                            </p>
+                            
+                            <button onClick={handleLogin} className="w-full bg-green-600 text-white py-3 rounded-xl font-bold shadow-lg hover:bg-green-700 transition active:scale-95">
+                                Masuk Aplikasi
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            // --- TAMPILAN APLIKASI ---
+            return (
+                <div className="pb-24 max-w-full mx-auto min-h-screen font-sans text-slate-800">
+                    {/* Header */}
+                    <div className="bg-green-700 text-white p-4 sticky top-0 z-30 shadow-md flex justify-between items-center">
+                        <div>
+                            <h1 className="text-lg font-bold">Rapor Online</h1>
+                            <div className="flex items-center gap-1 opacity-90 text-xs">
+                                <span className="bg-white/20 px-2 py-0.5 rounded text-white">{schoolCode}</span>
+                            </div>
+                        </div>
+                        <div className="text-xs font-bold bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm flex items-center gap-2">
+                            {syncStatus === 'syncing' && <><div className="spinner"></div> Menyimpan...</>}
+                            {syncStatus === 'saved' && <>☁️ Tersimpan</>}
+                            {syncStatus === 'offline' && <>📴 Offline</>}
+                            {syncStatus === 'error' && <span className="text-red-200">⚠️ Error</span>}
+                        </div>
+                    </div>
+
+                    <div className="p-4">
+                        {/* Class Selector */}
+                        <div className="flex gap-2 overflow-x-auto pb-2 mb-4 hide-scrollbar">
+                            {classList.map(cls => (
+                                <button key={cls} onClick={() => { setSelectedClass(cls); setSelectedTopicIdForInput(''); }}
+                                    className={`px-4 py-2 rounded-full whitespace-nowrap text-sm font-bold transition-all ${selectedClass === cls ? 'bg-green-600 text-white shadow-lg' : 'bg-white text-gray-600 border border-gray-200'}`}>{cls}</button>
+                            ))}
+                        </div>
+
+                        {/* --- TAB SISWA --- */}
+                        {activeTab === 'siswa' && (
+                            <div className="animate-fade-in max-w-md mx-auto">
+                                <div className="bg-white p-4 rounded-xl shadow-sm border mb-4">
+                                    <h2 className="font-bold mb-3 flex items-center gap-2">👥 Siswa Kelas {selectedClass}</h2>
+                                    
+                                    {/* Import Excel */}
+                                    <div className="bg-emerald-50 border border-emerald-200 p-3 rounded-lg mb-4">
+                                        <p className="text-xs text-emerald-800 mb-2 font-medium">Import dari File Excel Ibu</p>
+                                        <button onClick={() => excelInputRef.current.click()} className="w-full bg-emerald-600 text-white py-2 rounded-lg text-sm font-bold shadow hover:bg-emerald-700 flex justify-center items-center gap-2">
+                                            📥 Pilih File Excel
+                                        </button>
+                                        <input type="file" ref={excelInputRef} onChange={handleImportExcel} className="hidden" accept=".xlsx, .xls" />
+                                    </div>
+
+                                    <div className="flex gap-2">
+                                        <input value={tempStudentName} onChange={e => setTempStudentName(e.target.value)} placeholder="Atau ketik nama..." className="flex-1 border p-2 rounded-lg text-sm" />
+                                        <button onClick={() => { if(tempStudentName) { setStudents([...students, { id: Date.now().toString(), name: tempStudentName, classId: selectedClass }]); setTempStudentName(''); }}} className="bg-green-600 text-white px-4 rounded-lg font-bold">+</button>
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    {filteredStudents.map((s, idx) => (
+                                        <div key={s.id} className="bg-white p-3 rounded-lg border flex justify-between items-center shadow-sm">
+                                            {editingStudentId === s.id ? (
+                                                <div className="flex gap-2 w-full"><input value={editStudentName} onChange={e => setEditStudentName(e.target.value)} className="border p-1 rounded w-full" /><button onClick={() => { setStudents(students.map(std => std.id === s.id ? {...std, name: editStudentName} : std)); setEditingStudentId(null); }} className="text-green-600">✅</button></div>
+                                            ) : (
+                                                <>
+                                                    <span className="font-medium text-sm">{idx+1}. {s.name}</span>
+                                                    <div className="flex gap-1">
+                                                        <button onClick={() => { setEditingStudentId(s.id); setEditStudentName(s.name); }} className="text-blue-500 text-xs border p-1 rounded">Edit</button>
+                                                        <button onClick={() => { if(confirm('Hapus siswa ini?')) setStudents(students.filter(std => std.id !== s.id)); }} className="text-red-500 text-xs border p-1 rounded">Hapus</button>
+                                                    </div>
+                                                </>
+                                            )}
+                                        </div>
+                                    ))}
+                                    {filteredStudents.length === 0 && <div className="text-center py-8 text-gray-400 text-sm">Belum ada siswa. Silakan Import Excel.</div>}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* --- TAB MATERI --- */}
+                        {activeTab === 'materi' && (
+                            <div className="max-w-md mx-auto">
+                                <div className="bg-white p-4 rounded-xl shadow-sm border mb-4">
+                                    <h2 className="font-bold mb-2">📚 Materi Kelas {getGradeLevel(selectedClass)}</h2>
+                                    <p className="text-xs text-gray-400 mb-2">*Materi berlaku untuk kelas A dan B</p>
+                                    <input value={tempTopicName} onChange={e => setTempTopicName(e.target.value)} placeholder="Nama Materi (Misal: Surah Al-Fatihah)" className="w-full border p-2 rounded-lg text-sm mb-2" />
+                                    <div className="flex gap-2 items-center">
+                                        <span className="text-sm font-bold text-gray-600">KKM:</span>
+                                        <input type="number" value={tempKKM} onChange={e => setTempKKM(e.target.value)} className="w-16 border p-2 rounded-lg text-sm text-center" />
+                                        <button onClick={() => { if(tempTopicName) { setTopics([...topics, { id: Date.now().toString(), name: tempTopicName, classId: getGradeLevel(selectedClass), kkm: parseInt(tempKKM)||70 }]); setTempTopicName(''); }}} className="bg-green-600 text-white py-2 px-4 rounded-lg flex-1 font-bold">Tambah Materi</button>
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    {filteredTopics.map(t => (
+                                        <div key={t.id} className="bg-white p-3 rounded-lg border flex justify-between items-center shadow-sm">
+                                            <div><div className="font-bold text-sm">{t.name}</div><div className="text-xs text-gray-500">KKM: {t.kkm}</div></div>
+                                            <button onClick={() => { if(confirm('Hapus materi? Nilai siswa di materi ini akan hilang.')) setTopics(topics.filter(top => top.id !== t.id)); }} className="text-red-500 text-xs bg-red-50 px-2 py-1 rounded">Hapus</button>
+                                        </div>
+                                    ))}
+                                    {filteredTopics.length === 0 && <div className="text-center py-8 text-gray-400 text-sm">Belum ada materi.</div>}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* --- TAB INPUT NILAI --- */}
+                        {activeTab === 'input' && (
+                            <div className="max-w-md mx-auto">
+                                <div className="flex bg-white rounded-lg p-1 border mb-4 shadow-sm">
+                                    <button onClick={() => setInputType('materi')} className={`flex-1 py-2 text-sm font-bold rounded ${inputType === 'materi' ? 'bg-green-100 text-green-700 shadow-sm' : 'text-gray-500'}`}>Nilai Harian</button>
+                                    <button onClick={() => setInputType('sumatif')} className={`flex-1 py-2 text-sm font-bold rounded ${inputType === 'sumatif' ? 'bg-purple-100 text-purple-700 shadow-sm' : 'text-gray-500'}`}>Nilai Sumatif</button>
+                                </div>
+                                
+                                <div className="flex justify-end mb-4">
+                                    <button onClick={() => setIsGradeEditable(!isGradeEditable)} className={`px-3 py-1 rounded-full text-xs font-bold border transition-colors ${isGradeEditable ? 'bg-red-50 text-red-600 border-red-200' : 'bg-green-50 text-green-600 border-green-200'}`}>
+                                        {isGradeEditable ? '🔓 Mode Edit Aktif' : '🔒 Nilai Terkunci'}
+                                    </button>
+                                </div>
+
+                                {inputType === 'materi' && (
+                                    <>
+                                        <select value={selectedTopicIdForInput} onChange={e => setSelectedTopicIdForInput(e.target.value)} className="w-full p-3 bg-white border rounded-lg mb-4 font-bold shadow-sm">
+                                            <option value="">-- Pilih Materi Pembelajaran --</option>
+                                            {filteredTopics.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+                                        </select>
+
+                                        {selectedTopicIdForInput && filteredStudents.map(s => {
+                                            const t = topics.find(t => t.id === selectedTopicIdForInput);
+                                            const g = topicGrades[`${s.id}_${t.id}`];
+                                            const final = calculateFinalTopicScore(g, t.kkm);
+                                            const hG = (f, v) => {
+                                                const k = `${s.id}_${t.id}`;
+                                                const c = topicGrades[k] || {};
+                                                let n = parseFloat(v); if(isNaN(n)) n=0; if(n>100) n=100;
+                                                setTopicGrades({ ...topicGrades, [k]: { ...c, [f]: n } });
+                                            };
+                                            return (
+                                                <div key={s.id} className="bg-white p-4 rounded-xl border mb-3 shadow-sm">
+                                                    <div className="flex justify-between items-center mb-3">
+                                                        <span className="font-bold text-gray-800">{s.name}</span>
+                                                        <span className={`text-xs font-bold px-2 py-1 rounded ${final >= t.kkm ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>Akhir: {final.toFixed(0)}</span>
+                                                    </div>
+                                                    <div className="grid grid-cols-4 gap-2 mb-3">
+                                                        {['task1', 'task2', 'task3'].map((task,i) => (
+                                                            <div key={task}>
+                                                                <label className="text-[10px] text-gray-400 text-center block mb-1">T{i+1}</label>
+                                                                <input type="number" disabled={!isGradeEditable} className="w-full border p-1 rounded text-center bg-gray-50 focus:bg-white focus:ring-1 focus:ring-green-500 outline-none transition" value={g?.[task] || ''} onChange={e => hG(task, e.target.value)} />
+                                                            </div>
+                                                        ))}
+                                                        <div className="flex flex-col items-center justify-end">
+                                                            <span className="text-[10px] text-gray-400 mb-1">Rata</span>
+                                                            <div className="font-bold text-xs p-1.5 bg-gray-100 rounded w-full text-center">{calculateTaskAvg(g).toFixed(0)}</div>
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2 bg-slate-50 p-2 rounded">
+                                                        <span className="text-xs font-bold text-gray-600">Remedial:</span>
+                                                        <input type="number" disabled={!isGradeEditable} className="border w-16 p-1 rounded text-center bg-white" value={g?.remedial || ''} onChange={e => hG('remedial', e.target.value)} />
+                                                        <span className="text-[10px] text-gray-400 ml-auto">*Diisi jika dibawah KKM ({t.kkm})</span>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </>
+                                )}
+                                {inputType === 'sumatif' && filteredStudents.map(s => (
+                                    <div key={s.id} className="bg-white p-4 rounded-xl border mb-2 flex justify-between items-center shadow-sm">
+                                        <span className="font-bold">{s.name}</span>
+                                        <input type="number" disabled={!isGradeEditable} placeholder="0" className="w-20 text-center text-lg font-bold border-2 p-2 rounded-lg border-purple-200 focus:bg-white bg-gray-50 focus:border-purple-500 outline-none" value={summativeGrades[s.id] || ''} onChange={e => setSummativeGrades({...summativeGrades, [s.id]: e.target.value})} />
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* --- TAB REKAP --- */}
+                        {activeTab === 'rekap' && (
+                            <div>
+                                <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl mb-4 max-w-md mx-auto">
+                                    <h3 className="font-bold text-blue-800 mb-2">☁️ Data Online & Laporan</h3>
+                                    <p className="text-xs text-blue-600 mb-3">
+                                        Data tersimpan otomatis. Kode Sekolah: <strong>{schoolCode}</strong>
+                                    </p>
+                                    <button onClick={downloadCSV} className="w-full bg-green-600 text-white py-2.5 rounded-lg text-sm font-bold shadow hover:bg-green-700 transition flex items-center justify-center gap-2">
+                                        📥 Download Excel Lengkap
+                                    </button>
+                                </div>
+                                <div className="bg-white rounded-xl shadow-lg border overflow-hidden relative">
+                                    <div className="overflow-x-auto pb-4">
+                                        <table className="text-[10px] text-left border-collapse w-full">
+                                            <thead className="bg-green-700 text-white uppercase text-center sticky top-0 z-20">
+                                                <tr>
+                                                    <th rowSpan="2" className="px-2 py-1 border-r border-green-600 sticky left-0 bg-green-700 z-30">No</th>
+                                                    <th rowSpan="2" className="px-2 py-1 border-r border-green-600 min-w-[150px] sticky left-[30px] bg-green-700 z-30">Nama</th>
+                                                    {filteredTopics.map(t => (<th key={t.id} colSpan="5" className="px-1 py-1 border-r border-green-600 border-b">{t.name}</th>))}
+                                                    <th colSpan="5" className="px-1 py-1 bg-green-800 border-b">HASIL AKHIR</th>
+                                                </tr>
+                                                <tr>
+                                                    {filteredTopics.map(t => (<React.Fragment key={t.id}><th className="px-1 py-1 w-8 border-r bg-green-600 border-green-500">1</th><th className="px-1 py-1 w-8 border-r bg-green-600 border-green-500">2</th><th className="px-1 py-1 w-8 border-r bg-green-600 border-green-500">3</th><th className="px-1 py-1 w-8 border-r bg-green-600 border-green-500">Rt</th><th className="px-1 py-1 w-8 border-r bg-green-800 border-green-500">Akhir</th></React.Fragment>))}
+                                                    <th className="px-2 py-1 border-r bg-blue-600 border-blue-500">Rata</th><th className="px-2 py-1 border-r bg-blue-600 border-blue-500">70%</th><th className="px-2 py-1 border-r bg-yellow-600 border-yellow-500">Sum</th><th className="px-2 py-1 border-r bg-yellow-600 border-yellow-500">30%</th><th className="px-2 py-1 bg-green-900 font-bold">RAPOR</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y">
+                                                {filteredStudents.map((s, idx) => {
+                                                    let totalFinalScore = 0;
+                                                    const topicCells = filteredTopics.map(t => {
+                                                        const g = topicGrades[`${s.id}_${t.id}`] || {};
+                                                        const avg = calculateTaskAvg(g);
+                                                        const final = calculateFinalTopicScore(g, t.kkm);
+                                                        totalFinalScore += final;
+                                                        return { g, avg, final };
+                                                    });
+                                                    const avgMateri = filteredTopics.length ? (totalFinalScore / filteredTopics.length) : 0;
+                                                    const val70 = avgMateri * 0.7;
+                                                    const sumatif = parseFloat(summativeGrades[s.id] || 0);
+                                                    const val30 = sumatif * 0.3;
+                                                    const rapor = val70 + val30;
+                                                    return (
+                                                        <tr key={s.id} className="hover:bg-slate-50">
+                                                            <td className="px-2 py-2 border-r sticky left-0 bg-white z-10 font-bold text-center border-b">{idx + 1}</td>
+                                                            <td className="px-2 py-2 border-r sticky left-[30px] bg-white z-10 font-medium truncate max-w-[150px] border-b">{s.name}</td>
+                                                            {topicCells.map((cell, i) => (<React.Fragment key={i}><td className="text-center border-r bg-slate-50">{cell.g.task1||'-'}</td><td className="text-center border-r bg-slate-50">{cell.g.task2||'-'}</td><td className="text-center border-r bg-slate-50">{cell.g.task3||'-'}</td><td className="text-center border-r bg-slate-100 font-medium">{cell.avg>0?cell.avg.toFixed(0):'-'}</td><td className="text-center border-r font-bold bg-green-50 text-green-700">{cell.final.toFixed(0)}</td></React.Fragment>))}
+                                                            <td className="text-center border-r bg-blue-50 font-medium">{avgMateri.toFixed(1)}</td><td className="text-center border-r bg-blue-50 text-gray-500">{val70.toFixed(1)}</td><td className="text-center border-r bg-yellow-50 font-medium">{sumatif}</td><td className="text-center border-r bg-yellow-50 text-gray-500">{val30.toFixed(1)}</td><td className={`text-center font-bold text-white ${rapor >= 75 ? 'bg-green-500' : 'bg-red-500'}`}>{rapor.toFixed(0)}</td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                        {filteredStudents.length === 0 && <div className="p-8 text-center text-gray-400 text-xs">Belum ada siswa di kelas ini</div>}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* MENU BAWAH */}
+                    <div className="fixed bottom-0 left-0 right-0 bg-white border-t flex justify-around p-2 z-40 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] text-gray-500">
+                        <button onClick={() => setActiveTab('siswa')} className={`flex flex-col items-center w-16 transition ${activeTab === 'siswa' ? 'text-green-600 font-bold -translate-y-1' : ''}`}><span className="text-xl">👥</span><span className="text-[10px]">Siswa</span></button>
+                        <button onClick={() => setActiveTab('materi')} className={`flex flex-col items-center w-16 transition ${activeTab === 'materi' ? 'text-green-600 font-bold -translate-y-1' : ''}`}><span className="text-xl">📚</span><span className="text-[10px]">Materi</span></button>
+                        <button onClick={() => setActiveTab('input')} className={`flex flex-col items-center w-16 transition ${activeTab === 'input' ? 'text-green-600 font-bold -translate-y-1' : ''}`}><span className="text-xl">📝</span><span className="text-[10px]">Input</span></button>
+                        <button onClick={() => setActiveTab('rekap')} className={`flex flex-col items-center w-16 transition ${activeTab === 'rekap' ? 'text-green-600 font-bold -translate-y-1' : ''}`}><span className="text-xl">📊</span><span className="text-[10px]">Rekap</span></button>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
